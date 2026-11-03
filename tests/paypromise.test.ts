@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { analyzeWithRules, RulesAnalyzer } from "../server/ai.ts";
 import { type Analysis, type Invoice, proposeAction } from "../server/domain.ts";
-import { SimulatedPaypal } from "../server/paypal.ts";
+import { type PaypalInvoiceState, SimulatedPaypal } from "../server/paypal.ts";
 import { Service } from "../server/service.ts";
 import { Store } from "../server/store.ts";
 
@@ -173,5 +173,34 @@ describe("cash forecast", () => {
     const { action } = await service.addReply(created.id, "I will pay on Friday");
     await service.decide(action.id, true);
     expect(service.state().forecast).toMatchObject({ promised: 0, later: 100000, shortfall: 50000 });
+  });
+});
+
+describe("PayPal payment events", () => {
+  class PaidPaypal extends SimulatedPaypal {
+    remote: PaypalInvoiceState | null = null;
+    override async get() {
+      return this.remote;
+    }
+  }
+
+  it("records a new PayPal payment once in the invoice history", async () => {
+    const paypal = new PaidPaypal();
+    const service = new Service(new Store(), paypal, new RulesAnalyzer(), () => TODAY);
+    const created = await service.createInvoice({
+      customerName: "Test Co",
+      customerEmail: "a@test.example",
+      description: "Work",
+      amount: 100000,
+      dueDate: "2026-11-20",
+    });
+    paypal.remote = { paypalId: created.paypalId, amount: 100000, paid: 40000, status: "PARTIALLY_PAID", payUrl: null };
+
+    await service.syncByPaypalId(created.paypalId);
+    await service.syncByPaypalId(created.paypalId);
+
+    const payments = service.store.events(created.id).filter((e) => e.text.startsWith("PayPal confirmed"));
+    expect(payments).toHaveLength(1);
+    expect(payments[0].text).toContain("$400.00");
   });
 });

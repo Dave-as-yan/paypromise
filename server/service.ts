@@ -191,12 +191,9 @@ export class Service {
       case "VERIFY_PAYMENT": {
         await this.syncInvoice(invoice);
         const updated = this.requireInvoice(invoice.id);
-        this.store.addEvent(
-          invoice.id,
-          updated.paid > invoice.paid
-            ? `PayPal confirms a new payment. Paid so far: ${usd(updated.paid)}.`
-            : `PayPal shows no new payment. Paid so far: ${usd(updated.paid)}.`,
-        );
+        if (updated.paid === invoice.paid) {
+          this.store.addEvent(invoice.id, `PayPal shows no new payment. Paid so far: ${usd(updated.paid)}.`);
+        }
         return;
       }
       case "REVIEW":
@@ -228,6 +225,9 @@ export class Service {
         status: remote.status,
         payUrl: remote.payUrl ?? invoice.payUrl,
       });
+      if (remote.paid > invoice.paid) {
+        this.store.addEvent(invoice.id, `PayPal confirmed a payment of ${usd(remote.paid - invoice.paid)}. Paid so far: ${usd(remote.paid)}.`);
+      }
     }
   }
 

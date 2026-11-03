@@ -133,6 +133,15 @@ export function App() {
     [refresh, loadDetail, selectedId],
   );
 
+  // PayPal's webhook updates the server, so an open dashboard has to ask for the news.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.hidden) return;
+      Promise.all([refresh(), loadDetail(selectedId)]).catch(() => {});
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [refresh, loadDetail, selectedId]);
+
   const columns = useMemo<ColDef<Row>[]>(
     () => [
       { field: "customerName", headerName: "Customer", flex: 2, minWidth: 170 },
