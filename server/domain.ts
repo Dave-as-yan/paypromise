@@ -1,5 +1,6 @@
 // Pure business rules. All money is integer cents; all dates are YYYY-MM-DD.
 import { z } from "zod";
+import type { PlanItem } from "./plan.ts";
 
 export const INTENTS = [
   "PROMISE_TO_PAY",
@@ -16,6 +17,7 @@ export const AnalysisSchema = z.object({
   promisedDate: z.string().nullable().describe("YYYY-MM-DD the customer committed to, or null"),
   promisedAmount: z.number().nullable().describe("US dollars the customer committed to pay, or null"),
   correctedAmount: z.number().nullable().describe("US dollars the customer says the full invoice should be, or null"),
+  evidence: z.string().nullable().describe("The shortest exact quote from the reply that supports this reading, or null"),
   reason: z.string().describe("One short sentence: why payment is late, in the customer's terms"),
   confidence: z.number().describe("0 to 1"),
   draftReply: z.string().describe("Short, polite reply the business owner could send"),
@@ -79,6 +81,11 @@ export const MIN_CONFIDENCE = 0.6;
 export const usd = (cents: number) =>
   `$${(cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
+const money = (cents: number) => usd(cents).replace(/\.00$/, "");
+
+export const niceDate = (date: string) =>
+  new Date(`${date}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+
 export const toCents = (dollars: number) => Math.round(dollars * 100);
 
 export const balanceOf = (invoice: Pick<Invoice, "amount" | "paid" | "status">) =>
@@ -133,7 +140,7 @@ export function proposeAction(analysis: Analysis, invoice: Invoice, today: strin
       const amount = promised ?? balance;
       return {
         type: "TRACK_PROMISE",
-        title: `Track promise: ${usd(amount)} by ${date}`,
+        title: `Track ${money(amount)} by ${niceDate(date)}`,
         rationale: "PayPromise will check PayPal on that date and flag the promise if the money has not arrived.",
         payload: { amount, dueDate: date },
         warnings: [],
@@ -144,7 +151,7 @@ export function proposeAction(analysis: Analysis, invoice: Invoice, today: strin
       const warnings = minimumDue < balance / 4 ? [`Minimum payment is under 25% of the ${usd(balance)} balance.`] : [];
       return {
         type: "ALLOW_PARTIAL",
-        title: `Allow partial payment: minimum ${usd(minimumDue)}`,
+        title: `Allow partial payment, ${money(minimumDue)} minimum`,
         rationale: "The customer cannot pay in full at once. This opens partial payment on the PayPal invoice. It is not credit.",
         payload: { minimumDue, ...(date ? { amount: minimumDue, dueDate: date } : {}) },
         warnings,
@@ -161,7 +168,7 @@ export function proposeAction(analysis: Analysis, invoice: Invoice, today: strin
       const reduction = (invoice.amount - newAmount) / invoice.amount;
       return {
         type: "CORRECT_INVOICE",
-        title: `Correct invoice: ${usd(invoice.amount)} to ${usd(newAmount)}`,
+        title: `Change the invoice from ${money(invoice.amount)} to ${money(newAmount)}`,
         rationale: "Only the customer claims this figure. Check it against your records before approving.",
         payload: { newAmount },
         warnings: reduction > 0.3 ? [`This lowers the invoice by ${Math.round(reduction * 100)}%.`] : [],
@@ -270,4 +277,89 @@ export function forecast(
     shortfall,
     shortfallIfRiskPays: Math.max(0, shortfall - atRisk),
   };
+}
+
+// A customer's record: what PayPal data proved across their promises, plus any sample history.
+export interface PromiseRecord {
+  kept: number;
+  broken: number;
+}
+
+export function promiseRecord(promises: Pick<PaymentPromise, "status">[], history: PromiseRecord = { kept: 0, broken: 0 }): PromiseRecord {
+  return {
+    kept: history.kept + promises.filter((p) => p.status === "KEPT").length,
+    broken: history.broken + promises.filter((p) => p.status === "BROKEN").length,
+  };
+}
+
+// One line for money counted toward the target date, another for the rest of the balance.
+export function planItems(inputs: RiskInput[], settings: { targetDate: string }, today: string): PlanItem[] {
+  const items: PlanItem[] = [];
+  for (const input of inputs) {
+    const { invoice, promises } = input;
+    const balance = balanceOf(invoice);
+    if (balance === 0) continue;
+
+    const tag = riskTag(input, today);
+    const base = { invoiceId: invoice.id, customerName: invoice.customerName, customerEmail: invoice.customerEmail };
+    const open = tag === "PROMISED" ? promises.filter((p) => p.status === "OPEN") : [];
+    const counted = open.find((p) => p.dueDate <= settings.targetDate);
+    const countedAmount = counted ? Math.min(balance, Math.max(0, counted.amount - (invoice.paid - counted.paidAtCreation))) : 0;
+    if (counted && countedAmount > 0) {
+      items.push({ ...base, id: `${invoice.id}:promise`, amount: countedAmount, date: counted.dueDate, kind: "PROMISED", counted: true, afterTarget: false });
+    }
+
+    const rest = balance - countedAmount;
+    if (rest > 0) {
+      const date = open[0]?.dueDate ?? invoice.dueDate;
+      const kind: PlanItem["kind"] =
+        tag === "BROKEN" ? "BROKEN" : tag === "DISPUTED" ? "DISPUTED" : tag === "PROMISED" ? "PROMISED" : invoice.dueDate < today ? "OVERDUE" : "NOT_DUE";
+      items.push({ ...base, id: `${invoice.id}:rest`, amount: rest, date, kind, counted: false, afterTarget: date > settings.targetDate });
+    }
+  }
+  return items;
+}
+
+export interface ActionImpact {
+  shortfallBefore: number;
+  shortfallAfter: number;
+  bestCaseChange: number;
+}
+
+const bestCase = (f: Forecast) => f.cashOnHand + f.promised + f.atRisk;
+
+// What approving would do to the forecast. Mirrors what the action does when it runs.
+export function actionImpact(
+  inputs: RiskInput[],
+  settings: { targetDate: string; obligation: number; cashOnHand: number },
+  today: string,
+  action: { invoiceId: string; type: ActionType; payload: ActionPayload },
+): ActionImpact {
+  const projected = inputs.map((input) => {
+    if (input.invoice.id !== action.invoiceId) return input;
+    const { amount, dueDate, newAmount } = action.payload;
+    if (action.type === "CORRECT_INVOICE" && newAmount != null) {
+      return { ...input, disputed: false, invoice: { ...input.invoice, amount: newAmount } };
+    }
+    if ((action.type === "TRACK_PROMISE" || action.type === "ALLOW_PARTIAL") && amount != null && dueDate) {
+      const hypothetical: PaymentPromise = {
+        id: "projected",
+        invoiceId: input.invoice.id,
+        replyId: null,
+        amount,
+        dueDate,
+        paidAtCreation: input.invoice.paid,
+        status: "OPEN",
+        createdAt: "",
+      };
+      return {
+        ...input,
+        promises: [...input.promises.map((p) => (p.status === "OPEN" ? { ...p, status: "BROKEN" as const } : p)), hypothetical],
+      };
+    }
+    return input;
+  });
+  const before = forecast(inputs, settings, today);
+  const after = forecast(projected, settings, today);
+  return { shortfallBefore: before.shortfall, shortfallAfter: after.shortfall, bestCaseChange: bestCase(after) - bestCase(before) };
 }

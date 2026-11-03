@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -9,7 +9,7 @@ export interface Reply {
   invoiceId: string;
   body: string;
   analysis: Analysis;
-  source: "claude" | "rules";
+  source: "claude" | "rules" | "customer";
   notice: string | null;
   createdAt: string;
 }
@@ -34,6 +34,7 @@ export interface TimelineEvent {
   id: string;
   invoiceId: string;
   text: string;
+  day: string | null;
   createdAt: string;
 }
 
@@ -41,6 +42,7 @@ export interface Settings {
   targetDate: string;
   obligation: number;
   obligationLabel: string;
+  businessName: string;
   cashOnHand: number;
   clockOffsetDays: number;
 }
@@ -68,6 +70,12 @@ CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY, invoice_id TEXT NOT NULL REFERENCES invoices(id), text TEXT NOT NULL, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS promise_links (
+  token TEXT PRIMARY KEY, invoice_id TEXT NOT NULL UNIQUE REFERENCES invoices(id), created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS customer_history (
+  email TEXT PRIMARY KEY, kept INTEGER NOT NULL, broken INTEGER NOT NULL
+);
 `;
 
 type Row = Record<string, any>;
@@ -128,10 +136,12 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA);
+    const columns = this.db.prepare("PRAGMA table_info(events)").all() as Row[];
+    if (!columns.some((c) => c.name === "day")) this.db.exec("ALTER TABLE events ADD COLUMN day TEXT;");
   }
 
   reset() {
-    this.db.exec("DELETE FROM events; DELETE FROM actions; DELETE FROM promises; DELETE FROM replies; DELETE FROM invoices; DELETE FROM settings;");
+    this.db.exec("DELETE FROM promise_links; DELETE FROM customer_history; DELETE FROM events; DELETE FROM actions; DELETE FROM promises; DELETE FROM replies; DELETE FROM invoices; DELETE FROM settings;");
   }
 
   settings(defaults: Settings): Settings {
@@ -232,8 +242,35 @@ export class Store {
     this.db.prepare("UPDATE actions SET status = ?, error = ? WHERE id = ?").run(status, error, id);
   }
 
-  addEvent(invoiceId: string, text: string) {
-    this.db.prepare("INSERT INTO events VALUES (?, ?, ?, ?)").run(randomUUID(), invoiceId, text, now());
+  addEvent(invoiceId: string, text: string, day: string | null = null) {
+    this.db
+      .prepare("INSERT INTO events (id, invoice_id, text, created_at, day) VALUES (?, ?, ?, ?, ?)")
+      .run(randomUUID(), invoiceId, text, now(), day);
+  }
+
+  // One unguessable link per invoice, so a customer's bookmark keeps working.
+  promiseLink(invoiceId: string): string {
+    const row = this.db.prepare("SELECT token FROM promise_links WHERE invoice_id = ?").get(invoiceId) as Row | undefined;
+    if (row) return row.token;
+    const token = randomBytes(16).toString("base64url");
+    this.db.prepare("INSERT INTO promise_links VALUES (?, ?, ?)").run(token, invoiceId, now());
+    return token;
+  }
+
+  invoiceByLink(token: string): Invoice | null {
+    const row = this.db.prepare("SELECT invoice_id FROM promise_links WHERE token = ?").get(token) as Row | undefined;
+    return row ? this.invoice(row.invoice_id) : null;
+  }
+
+  setHistory(email: string, kept: number, broken: number) {
+    this.db
+      .prepare("INSERT INTO customer_history VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET kept = excluded.kept, broken = excluded.broken")
+      .run(email.toLowerCase(), kept, broken);
+  }
+
+  history(email: string): { kept: number; broken: number } {
+    const row = this.db.prepare("SELECT kept, broken FROM customer_history WHERE email = ?").get(email.toLowerCase()) as Row | undefined;
+    return row ? { kept: row.kept, broken: row.broken } : { kept: 0, broken: 0 };
   }
 
   events(invoiceId: string): TimelineEvent[] {
@@ -241,6 +278,7 @@ export class Store {
       id: r.id,
       invoiceId: r.invoice_id,
       text: r.text,
+      day: r.day,
       createdAt: r.created_at,
     }));
   }

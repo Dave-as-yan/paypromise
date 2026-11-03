@@ -21,6 +21,16 @@ if (store.invoices().length === 0 && (paypal.mode === "simulated" || process.env
 
 const app = express();
 app.set("trust proxy", 1);
+
+// Open dashboards hold this stream and refetch when told something changed.
+const streams = new Set<Response>();
+const announce = () => {
+  for (const stream of streams) stream.write("event: changed\ndata: {}\n\n");
+};
+app.use((req, res, next) => {
+  if (req.method !== "GET" && req.path.startsWith("/api/")) res.on("finish", announce);
+  next();
+});
 const date = z.string().refine((value) => isValidDate(value), "Use a valid YYYY-MM-DD date.");
 const dollars = z.number().positive().max(1_000_000);
 
@@ -55,6 +65,47 @@ app.post("/api/webhooks/paypal", express.raw({ type: "application/json", limit: 
 
 app.use(express.json({ limit: "50kb" }));
 
+app.get("/api/events", (req, res) => {
+  res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" });
+  res.write(": connected\n\n");
+  streams.add(res);
+  // Proxies close silent connections, so send a comment line every 15 seconds.
+  const heartbeat = setInterval(() => res.write(": ping\n\n"), 15_000);
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    streams.delete(res);
+  });
+});
+
+app.get("/api/public/promises/:token", (req, res) => {
+  if (!allow(`link:${req.ip ?? "unknown"}`, 60, 60_000)) throw new HttpError(429, "Too many requests. Try again in a minute.");
+  res.json(service.publicInvoice(String(req.params.token)));
+});
+
+app.post("/api/public/promises/:token", limitWrites, (req, res) => {
+  const token = String(req.params.token);
+  if (!allow(`answer:${token}`, 10, 3_600_000)) throw new HttpError(429, "Too many answers for this invoice. Try again later.");
+  const input = z
+    .object({
+      choice: z.enum(["DATE", "PARTIAL", "DISPUTE", "PAID"]),
+      date: date.optional(),
+      amount: dollars.optional(),
+      correctedAmount: dollars.optional(),
+      note: z.string().trim().max(500).optional(),
+    })
+    .refine((v) => v.choice !== "DATE" || v.date, "Choose a date.")
+    .parse(req.body);
+  res.status(201).json(service.respondFromLink(token, input));
+});
+
+app.get("/api/customers/:email", (req, res) => {
+  res.json(service.customerDetail(String(req.params.email)));
+});
+
+app.post("/api/invoices/:id/ask-for-date", limitWrites, (req, res) => {
+  res.status(201).json(service.askForDate(String(req.params.id)));
+});
+
 app.get("/api/state", (_req, res) => {
   service.settlePromises();
   res.json(service.state());
@@ -84,7 +135,8 @@ app.post("/api/invoices/:id/replies", limitWrites, async (req, res) => {
 
 app.post("/api/actions/:id/:decision", async (req, res) => {
   const decision = z.enum(["approve", "reject"]).parse(req.params.decision);
-  res.json(await service.decide(String(req.params.id), decision === "approve"));
+  const { note } = z.object({ note: z.string().trim().min(1).max(1000).optional() }).parse(req.body ?? {});
+  res.json(await service.decide(String(req.params.id), decision === "approve", note));
 });
 
 app.post("/api/sync", async (_req, res) => {
@@ -98,6 +150,7 @@ app.put("/api/settings", (req, res) => {
       targetDate: date.optional(),
       obligation: z.number().min(0).max(100_000_000).optional(),
       obligationLabel: z.string().trim().min(1).max(40).optional(),
+      businessName: z.string().trim().min(1).max(80).optional(),
       cashOnHand: z.number().min(0).max(100_000_000).optional(),
     })
     .parse(req.body);
