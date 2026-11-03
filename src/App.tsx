@@ -16,7 +16,7 @@ interface Row extends Invoice {
 
 interface AppState {
   today: string;
-  modes: { paypal: "simulated" | "sandbox"; ai: "claude" | "rules" };
+  modes: { paypal: "simulated" | "sandbox"; ai: "claude" | "rules"; demoClock: boolean };
   settings: Settings;
   forecast: Forecast;
   invoices: Row[];
@@ -191,11 +191,11 @@ export function App() {
 
       <CashPanel state={state} busy={busy} onSave={(changes) => run(() => api("/settings", { method: "PUT", body: changes }))} />
 
-      {simulated && (
+      {state.modes.demoClock && (
         <div className="demobar">
           <span>Demo controls. Today is <strong>{shortDate(state.today)}</strong>.</span>
           <button disabled={busy} onClick={() => run(() => api("/demo/advance", { method: "POST", body: { days: 1 } }))}>Next day</button>
-          <button disabled={busy} onClick={() => run(async () => { await api("/demo/reset", { method: "POST" }); setSelectedId(null); })}>Reset demo</button>
+          {simulated && <button disabled={busy} onClick={() => run(async () => { await api("/demo/reset", { method: "POST" }); setSelectedId(null); })}>Reset demo</button>}
         </div>
       )}
 

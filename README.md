@@ -66,7 +66,21 @@ npm run build
 npm start
 ```
 
-Serves the API and dashboard on `PORT`. There is no login, so host demo data only.
+Serves the API and dashboard on `PORT`. `render.yaml` defines a Render deployment. There is no login, so host demo data only.
+
+Two optional settings support a hosted demo:
+
+| Setting | Effect |
+|---|---|
+| `SEED_DEMO=true` | Creates sample sandbox invoices when the database is empty |
+| `DEMO_TOOLS=true` | Shows a **Next day** button, so a broken promise can be demonstrated. It changes only the app's date, not PayPal |
+
+## Testing a payment
+
+1. In the PayPal developer dashboard, create a US sandbox **Business** account and a sandbox app linked to it, with **Invoicing** enabled. Use that app's credentials. A checkout failed with an Armenia-registered sandbox merchant in our testing and worked with a US one.
+2. Create or select an invoice and choose **Open PayPal invoice**.
+3. Pay with a sandbox **Personal** account.
+4. Choose **Sync with PayPal**, or configure the webhook, to update the dashboard.
 
 ## License
 

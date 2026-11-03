@@ -75,7 +75,7 @@ export class Service {
     const inputs = this.store.invoices().map((invoice) => this.riskInput(invoice));
     return {
       today,
-      modes: { paypal: this.paypal.mode, ai: this.analyzer.name },
+      modes: { paypal: this.paypal.mode, ai: this.analyzer.name, demoClock: this.clockAllowed() },
       settings,
       forecast: forecast(inputs, settings, today),
       invoices: inputs.map((input) => {
@@ -291,8 +291,13 @@ export class Service {
     this.settlePromises();
   }
 
+  // Moving the app's own date never touches PayPal, so a hosted sandbox demo can use it too.
+  private clockAllowed() {
+    return this.paypal.mode === "simulated" || process.env.DEMO_TOOLS === "true";
+  }
+
   advanceClock(days: number) {
-    this.requireSimulated();
+    if (!this.clockAllowed()) throw new HttpError(400, "The demo clock is turned off.");
     const settings = this.settings();
     this.store.saveSettings({ ...settings, clockOffsetDays: settings.clockOffsetDays + days });
     this.settlePromises();
@@ -314,11 +319,11 @@ export class Service {
       cashOnHand: 150000,
     });
     const samples: NewInvoiceInput[] = [
-      { customerName: "Harbor Street Cafe", customerEmail: "owner@harborcafe.example", description: "Kitchen rewiring", amount: 240000, dueDate: addDays(today, -12) },
-      { customerName: "Maple Dental", customerEmail: "office@mapledental.example", description: "Lighting upgrade", amount: 185000, dueDate: addDays(today, -6) },
-      { customerName: "Northside Gym", customerEmail: "finance@northsidegym.example", description: "Panel replacement", amount: 320000, dueDate: addDays(today, -3) },
-      { customerName: "Lena Brooks", customerEmail: "lena@brooks.example", description: "Home EV charger install", amount: 96000, dueDate: addDays(today, 2) },
-      { customerName: "Oak & Iron Studio", customerEmail: "hello@oakiron.example", description: "Workshop circuits", amount: 150000, dueDate: addDays(today, 14) },
+      { customerName: "Harbor Street Cafe", customerEmail: "harbor.cafe@example.com", description: "Kitchen rewiring", amount: 240000, dueDate: addDays(today, -12) },
+      { customerName: "Maple Dental", customerEmail: "maple.dental@example.com", description: "Lighting upgrade", amount: 185000, dueDate: addDays(today, -6) },
+      { customerName: "Northside Gym", customerEmail: "northside.gym@example.com", description: "Panel replacement", amount: 320000, dueDate: addDays(today, -3) },
+      { customerName: "Lena Brooks", customerEmail: "lena.brooks@example.com", description: "Home EV charger install", amount: 96000, dueDate: addDays(today, 2) },
+      { customerName: "Oak & Iron Studio", customerEmail: "oak.iron@example.com", description: "Workshop circuits", amount: 150000, dueDate: addDays(today, 14) },
     ];
     for (const sample of samples) await this.createInvoice(sample);
   }

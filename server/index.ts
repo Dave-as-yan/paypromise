@@ -14,19 +14,27 @@ const paypal = createPaypal();
 const store = new Store(process.env.DATABASE_PATH ?? `data/paypromise-${paypal.mode}.db`);
 const service = new Service(store, paypal, createAnalyzer());
 
-if (service.paypal.mode === "simulated" && store.invoices().length === 0) await service.seedDemo();
+// A hosted demo restarts with an empty disk, so judges need sample invoices on boot.
+if (store.invoices().length === 0 && (paypal.mode === "simulated" || process.env.SEED_DEMO === "true")) {
+  await service.seedDemo().catch((error) => console.error("Could not create sample invoices:", error));
+}
 
 const app = express();
+app.set("trust proxy", 1);
 const date = z.string().refine((value) => isValidDate(value), "Use a valid YYYY-MM-DD date.");
 const dollars = z.number().positive().max(1_000_000);
 
-// Each reply costs an AI call, so a public demo needs a ceiling.
-const replyHits = new Map<string, number[]>();
-function limitReplies(req: Request, _res: Response, next: NextFunction) {
-  const key = req.ip ?? "unknown";
-  const recent = (replyHits.get(key) ?? []).filter((t) => t > Date.now() - 60_000);
-  if (recent.length >= 15) throw new HttpError(429, "Too many replies. Try again in a minute.");
-  replyHits.set(key, [...recent, Date.now()]);
+// Replies cost an AI call and invoices call PayPal, so a public demo needs ceilings.
+const hits = new Map<string, number[]>();
+function allow(key: string, limit: number, windowMs: number): boolean {
+  const recent = (hits.get(key) ?? []).filter((t) => t > Date.now() - windowMs);
+  if (recent.length >= limit) return false;
+  hits.set(key, [...recent, Date.now()]);
+  return true;
+}
+function limitWrites(req: Request, _res: Response, next: NextFunction) {
+  const perVisitor = allow(`ip:${req.ip ?? "unknown"}`, 15, 60_000);
+  if (!perVisitor || !allow("all", 300, 3_600_000)) throw new HttpError(429, "Too many requests. Try again in a minute.");
   next();
 }
 
@@ -54,7 +62,7 @@ app.get("/api/invoices/:id", (req, res) => {
   res.json(service.detail(String(req.params.id)));
 });
 
-app.post("/api/invoices", async (req, res) => {
+app.post("/api/invoices", limitWrites, async (req, res) => {
   const input = z
     .object({
       customerName: z.string().trim().min(1).max(120),
@@ -67,7 +75,7 @@ app.post("/api/invoices", async (req, res) => {
   res.status(201).json(await service.createInvoice({ ...input, amount: toCents(input.amount) }));
 });
 
-app.post("/api/invoices/:id/replies", limitReplies, async (req, res) => {
+app.post("/api/invoices/:id/replies", limitWrites, async (req, res) => {
   const { body } = z.object({ body: z.string().trim().min(1).max(4000) }).parse(req.body);
   res.status(201).json(await service.addReply(String(req.params.id), body));
 });
