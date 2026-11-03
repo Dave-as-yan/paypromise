@@ -42,6 +42,8 @@ function limitWrites(req: Request, _res: Response, next: NextFunction) {
 app.post("/api/webhooks/paypal", express.raw({ type: "application/json", limit: "200kb" }), async (req, res) => {
   const webhookId = process.env.PAYPAL_WEBHOOK_ID;
   if (!(service.paypal instanceof SandboxPaypal) || !webhookId) throw new HttpError(503, "Webhook is not configured.");
+  const required = ["paypal-auth-algo", "paypal-cert-url", "paypal-transmission-id", "paypal-transmission-sig", "paypal-transmission-time"];
+  if (required.some((name) => !req.headers[name])) throw new HttpError(401, "Bad webhook signature.");
   const event = JSON.parse(req.body.toString("utf8"));
   if (!(await service.paypal.verifyWebhook(req.headers, event, webhookId))) throw new HttpError(401, "Bad webhook signature.");
   const paypalId = event.resource?.invoice?.id ?? event.resource?.id;
