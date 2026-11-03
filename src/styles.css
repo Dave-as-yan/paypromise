@@ -265,7 +265,7 @@ label.field { display: grid; gap: 4px; font-size: 13px; font-weight: 550; color:
 .dialog { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(480px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px; z-index: 50; display: grid; gap: 12px; }
 .dialog h2 { font-size: 17px; font-weight: 700; }
 .chips { display: flex; flex-wrap: wrap; gap: 5px; }
-.demobar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 16px; padding: 8px 12px; border: 1px dashed var(--line); border-radius: 10px; font-size: 13px; color: var(--muted); }
+.demobar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; padding: 8px 12px; border: 1px dashed var(--line); border-radius: 10px; font-size: 13px; color: var(--muted); }
 .demobar span { margin-right: auto; }
 
 @media (max-width: 1000px) {

@@ -56,7 +56,10 @@ function Dashboard({ path, navigate }: { path: string; navigate: (to: string) =>
   }, [refresh]);
 
   // PayPal's webhook changes the server, so it tells open pages. Polling covers a lost stream.
+  // Waits for the first state, which is what sets a new visitor's demo cookie.
+  const ready = state !== null;
   useEffect(() => {
+    if (!ready) return;
     const stream = new EventSource("/api/events");
     stream.addEventListener("changed", () => refresh().catch(() => {}));
     const timer = setInterval(() => {
@@ -66,7 +69,7 @@ function Dashboard({ path, navigate }: { path: string; navigate: (to: string) =>
       stream.close();
       clearInterval(timer);
     };
-  }, [refresh]);
+  }, [ready, refresh]);
 
   const run = useCallback(
     async (task: () => Promise<unknown>) => {
@@ -112,6 +115,19 @@ function Dashboard({ path, navigate }: { path: string; navigate: (to: string) =>
     return () => clearTimeout(timer);
   }, [queued, send]);
 
+  const [switching, setSwitching] = useState(false);
+  const startDemo = async (kind: "simulated" | "sandbox") => {
+    setSwitching(true);
+    setError(null);
+    try {
+      await api("/demo/workspace", { method: "POST", body: { kind } });
+      window.location.assign("/");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Something went wrong.");
+      setSwitching(false);
+    }
+  };
+
   const reject = useCallback((actionId: string) => void run(() => api(`/actions/${actionId}/reject`, { method: "POST", body: {} })), [run]);
 
   if (!state) return <div className="empty">{error ?? "Loading PayPromise..."}</div>;
@@ -144,13 +160,33 @@ function Dashboard({ path, navigate }: { path: string; navigate: (to: string) =>
             {link("/customers", "Customers", path.startsWith("/customers"))}
           </nav>
           <div className="top-right">
-            <span className="live"><span className={`dot ${simulated ? "off" : ""}`} />{simulated ? "Demo: PayPal simulated" : "PayPal sandbox connected"}</span>
+            <span className="live"><span className={`dot ${simulated ? "off" : ""}`} />{simulated ? "PayPal simulated" : "PayPal sandbox connected"}</span>
             <span className="live">AI: {state.modes.ai === "claude" ? "Claude" : "offline rules"}</span>
             {!simulated && <button className="btn sm" disabled={busy} onClick={() => run(() => api("/sync", { method: "POST" }))}>Check PayPal</button>}
             <button className="btn sm ghost" onClick={toggle} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}>{theme === "dark" ? "Light" : "Dark"}</button>
             <button className="btn primary" onClick={() => setDialog("invoice")}>New invoice</button>
           </div>
         </header>
+
+        {state.modes.demoClock && (
+          <div className="demobar">
+            <span>
+              {switching ? (
+                "Creating real invoices on PayPal's sandbox. This takes about 20 seconds..."
+              ) : (
+                <>
+                  {state.workspace.isolated ? "This is your private demo with sample data. " : "Sample data for this demo. "}
+                  {simulated ? "PayPal is simulated. " : state.workspace.isolated ? "Its invoices are real PayPal sandbox invoices. " : ""}
+                  The app's date is <b>{shortDate(state.today)}</b>.
+                </>
+              )}
+            </span>
+            <button className="btn sm" disabled={busy || switching} onClick={() => run(() => api("/demo/advance", { method: "POST", body: { days: 1 } }))}>Next day</button>
+            {(simulated || state.workspace.isolated) && <button className="btn sm" disabled={busy || switching} onClick={() => run(async () => { await api("/demo/reset", { method: "POST" }); navigate("/"); })}>Reset demo</button>}
+            {simulated && state.workspace.canUseSandbox && <button className="btn sm primary" disabled={busy || switching} onClick={() => void startDemo("sandbox")}>Use real PayPal sandbox</button>}
+            {!simulated && state.workspace.isolated && <button className="btn sm" disabled={busy || switching} onClick={() => void startDemo("simulated")}>Use simulated PayPal</button>}
+          </div>
+        )}
 
         {error && <div className="notice error" role="alert">{error}</div>}
 
@@ -164,13 +200,6 @@ function Dashboard({ path, navigate }: { path: string; navigate: (to: string) =>
           <Suspense fallback={<div className="empty">Loading...</div>}><Today {...workspace} onEditPayroll={() => setDialog("payroll")} /></Suspense>
         )}
 
-        {state.modes.demoClock && (
-          <div className="demobar">
-            <span>Sample data for this demo. The app's date is <b>{shortDate(state.today)}</b>.</span>
-            <button className="btn sm" disabled={busy} onClick={() => run(() => api("/demo/advance", { method: "POST", body: { days: 1 } }))}>Next day</button>
-            {simulated && <button className="btn sm" disabled={busy} onClick={() => run(async () => { await api("/demo/reset", { method: "POST" }); navigate("/"); })}>Reset demo</button>}
-          </div>
-        )}
       </div>
 
       {queued && <UndoToast key={queued.actionId} title={queued.title} onUndo={() => setQueued(null)} onNow={() => { setQueued(null); void send(queued); }} />}

@@ -5,6 +5,7 @@ import { type PaypalInvoiceState, SimulatedPaypal } from "../server/paypal.ts";
 import { planShortfall, runningCash } from "../server/plan.ts";
 import { Service } from "../server/service.ts";
 import { Store } from "../server/store.ts";
+import { Workspaces } from "../server/workspaces.ts";
 
 const TODAY = "2026-11-03"; // a Tuesday
 
@@ -413,5 +414,81 @@ describe("proposals on settled invoices", () => {
     expect(service.store.promises(created.id)[0].status).toBe("KEPT");
     service.advanceClock(10);
     expect(service.store.actions(created.id).filter((a) => a.status === "PENDING")).toHaveLength(0);
+  });
+});
+
+describe("private demo workspaces", () => {
+  const clock = () => TODAY;
+  const hosted = (paypal = new SimulatedPaypal(), maxWorkspaces?: number) =>
+    new Workspaces({ isolated: true, paypal, analyzer: new RulesAnalyzer(), clock, maxWorkspaces });
+
+  it("gives each new visitor their own data, clock and decisions", async () => {
+    process.env.DEMO_TOOLS = "true";
+    const all = hosted();
+    const a = (await all.resolve(undefined)).workspace;
+    const b = (await all.resolve(undefined)).workspace;
+    expect(a.id).not.toBe(b.id);
+    a.service.advanceClock(4);
+    const [decision] = b.service.state().decisions;
+    await b.service.decide(decision.action.id, true);
+    expect(a.service.today()).toBe("2026-11-07");
+    expect(b.service.today()).toBe(TODAY);
+    expect(b.service.state().forecast.shortfall).toBe(230000);
+    expect(a.service.state().forecast.promised).toBe(0);
+    delete process.env.DEMO_TOOLS;
+  });
+
+  it("returns the same workspace for a returning visitor and a new one for an unknown id", async () => {
+    const all = hosted();
+    const first = await all.resolve(undefined);
+    expect(first.created).toBe(true);
+    const again = await all.resolve(first.workspace.id);
+    expect(again.created).toBe(false);
+    expect(again.workspace.id).toBe(first.workspace.id);
+    expect((await all.resolve("made-up")).created).toBe(true);
+  });
+
+  it("routes customer links and PayPal events to the owning workspace only", async () => {
+    const all = hosted();
+    const a = (await all.resolve(undefined)).workspace;
+    const b = (await all.resolve(undefined)).workspace;
+    const invoice = b.service.store.invoices()[0];
+    const token = b.service.store.promiseLink(invoice.id);
+    expect(all.findByLink(token)?.id).toBe(b.id);
+    expect(all.findByPaypalId(invoice.paypalId)?.id).toBe(b.id);
+    expect(all.findByLink("nope")).toBeNull();
+    expect(a.service.store.invoiceByLink(token)).toBeNull();
+  });
+
+  it("drops one-time visitors before anyone actually using a demo", async () => {
+    const all = hosted(new SimulatedPaypal(), 2);
+    const active = (await all.resolve(undefined)).workspace;
+    await all.resolve(active.id);
+    const bot = (await all.resolve(undefined)).workspace;
+    await all.resolve(undefined);
+    expect((await all.resolve(active.id)).created).toBe(false);
+    expect((await all.resolve(bot.id)).created).toBe(true);
+  });
+
+  it("offers real sandbox only when it's configured, and resets a private demo", async () => {
+    expect(hosted().canUseSandbox).toBe(false);
+    await expect(hosted().create("sandbox")).rejects.toThrow();
+    const workspace = (await hosted().resolve(undefined)).workspace;
+    const [decision] = workspace.service.state().decisions;
+    await workspace.service.decide(decision.action.id, true);
+    workspace.service.advanceClock(3);
+    await workspace.service.resetDemo();
+    const state = workspace.service.state();
+    expect(state.today).toBe(TODAY);
+    expect(state.decisions).toHaveLength(3);
+  });
+
+  it("keeps one shared saved workspace outside the public demo", async () => {
+    const all = new Workspaces({ isolated: false, paypal: new SimulatedPaypal(), analyzer: new RulesAnalyzer(), databasePath: ":memory:", clock });
+    await all.start();
+    const a = await all.resolve(undefined);
+    const b = await all.resolve("anything");
+    expect(a.workspace.id).toBe(b.workspace.id);
+    expect(a.workspace.service.store.invoices()).toHaveLength(5);
   });
 });

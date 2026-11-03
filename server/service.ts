@@ -540,7 +540,7 @@ export class Service {
   }
 
   async resetDemo() {
-    this.requireSimulated();
+    if (!this.clockAllowed()) throw new HttpError(400, "Demo controls are turned off.");
     this.store.reset();
     await this.seedDemo();
   }

@@ -6,31 +6,28 @@ import { z } from "zod";
 import { createAnalyzer } from "./ai.ts";
 import { isValidDate, toCents } from "./domain.ts";
 import { createPaypal, SandboxPaypal } from "./paypal.ts";
-import { HttpError, Service } from "./service.ts";
-import { Store } from "./store.ts";
+import { HttpError, type Service } from "./service.ts";
+import { type Workspace, Workspaces } from "./workspaces.ts";
 
 const paypal = createPaypal();
-// Demo invoices have no PayPal record, so they must not mix with sandbox ones.
-const store = new Store(process.env.DATABASE_PATH ?? `data/paypromise-${paypal.mode}.db`);
-const service = new Service(store, paypal, createAnalyzer());
+// DEMO_TOOLS marks a public demo, where one visitor must never see another visitor's changes.
+const workspaces = new Workspaces({
+  isolated: process.env.DEMO_TOOLS === "true",
+  paypal,
+  analyzer: createAnalyzer(),
+  databasePath: process.env.DATABASE_PATH ?? `data/paypromise-${paypal.mode}.db`,
+  seedShared: process.env.SEED_DEMO === "true",
+});
+await workspaces.start();
 
-// A hosted demo restarts with an empty disk, so judges need sample invoices on boot.
-if (store.invoices().length === 0 && (paypal.mode === "simulated" || process.env.SEED_DEMO === "true")) {
-  await service.seedDemo().catch((error) => console.error("Could not create sample invoices:", error));
-}
+const COOKIE = "pp_demo";
+const readCookie = (req: Request) =>
+  req.headers.cookie?.split(";").map((c) => c.trim()).find((c) => c.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1);
+const setCookie = (req: Request, res: Response, id: string) =>
+  res.setHeader("Set-Cookie", `${COOKIE}=${id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400${req.secure ? "; Secure" : ""}`);
 
 const app = express();
 app.set("trust proxy", 1);
-
-// Open dashboards hold this stream and refetch when told something changed.
-const streams = new Set<Response>();
-const announce = () => {
-  for (const stream of streams) stream.write("event: changed\ndata: {}\n\n");
-};
-app.use((req, res, next) => {
-  if (req.method !== "GET" && req.path.startsWith("/api/")) res.on("finish", announce);
-  next();
-});
 const date = z.string().refine((value) => isValidDate(value), "Use a valid YYYY-MM-DD date.");
 const dollars = z.number().positive().max(1_000_000);
 
@@ -51,35 +48,38 @@ function limitWrites(req: Request, _res: Response, next: NextFunction) {
 // Registered before the JSON parser: PayPal verifies the event against the exact payload.
 app.post("/api/webhooks/paypal", express.raw({ type: "application/json", limit: "200kb" }), async (req, res) => {
   const webhookId = process.env.PAYPAL_WEBHOOK_ID;
-  if (!(service.paypal instanceof SandboxPaypal) || !webhookId) throw new HttpError(503, "Webhook is not configured.");
+  if (!(paypal instanceof SandboxPaypal) || !webhookId) throw new HttpError(503, "Webhook is not configured.");
   const required = ["paypal-auth-algo", "paypal-cert-url", "paypal-transmission-id", "paypal-transmission-sig", "paypal-transmission-time"];
   if (required.some((name) => !req.headers[name])) throw new HttpError(401, "Bad webhook signature.");
   const event = JSON.parse(req.body.toString("utf8"));
-  if (!(await service.paypal.verifyWebhook(req.headers, event, webhookId))) throw new HttpError(401, "Bad webhook signature.");
+  if (!(await paypal.verifyWebhook(req.headers, event, webhookId))) throw new HttpError(401, "Bad webhook signature.");
   const paypalId = event.resource?.invoice?.id ?? event.resource?.id;
   if (typeof event.event_type === "string" && event.event_type.startsWith("INVOICING.INVOICE.") && paypalId) {
-    await service.syncByPaypalId(paypalId);
+    const workspace = workspaces.findByPaypalId(paypalId);
+    if (workspace) {
+      await workspace.service.syncByPaypalId(paypalId);
+      workspaces.announce(workspace);
+    }
   }
   res.sendStatus(200);
 });
 
 app.use(express.json({ limit: "50kb" }));
 
-app.get("/api/events", (req, res) => {
-  res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" });
-  res.write(": connected\n\n");
-  streams.add(res);
-  // Proxies close silent connections, so send a comment line every 15 seconds.
-  const heartbeat = setInterval(() => res.write(": ping\n\n"), 15_000);
-  req.on("close", () => {
-    clearInterval(heartbeat);
-    streams.delete(res);
-  });
+app.get("/api/health", (_req, res) => {
+  res.json({ ok: true });
 });
+
+function byLink(token: string): Workspace {
+  const workspace = workspaces.findByLink(token);
+  if (!workspace) throw new HttpError(404, "This link isn't valid.");
+  return workspace;
+}
 
 app.get("/api/public/promises/:token", (req, res) => {
   if (!allow(`link:${req.ip ?? "unknown"}`, 60, 60_000)) throw new HttpError(429, "Too many requests. Try again in a minute.");
-  res.json(service.publicInvoice(String(req.params.token)));
+  const token = String(req.params.token);
+  res.json(byLink(token).service.publicInvoice(token));
 });
 
 app.post("/api/public/promises/:token", limitWrites, (req, res) => {
@@ -95,24 +95,54 @@ app.post("/api/public/promises/:token", limitWrites, (req, res) => {
     })
     .refine((v) => v.choice !== "DATE" || v.date, "Choose a date.")
     .parse(req.body);
-  res.status(201).json(service.respondFromLink(token, input));
+  const workspace = byLink(token);
+  res.status(201).json(workspace.service.respondFromLink(token, input));
+  workspaces.announce(workspace);
+});
+
+// Everything below belongs to the visitor's own workspace.
+app.use("/api", async (req, res, next) => {
+  const { workspace, created } = await workspaces.resolve(readCookie(req));
+  if (created) setCookie(req, res, workspace.id);
+  res.locals.workspace = workspace;
+  if (req.method !== "GET") res.on("finish", () => workspaces.announce(workspace));
+  next();
+});
+const serviceOf = (res: Response): Service => (res.locals.workspace as Workspace).service;
+
+app.get("/api/events", (req, res) => {
+  const workspace = res.locals.workspace as Workspace;
+  res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" });
+  res.write(": connected\n\n");
+  const listener = () => res.write("event: changed\ndata: {}\n\n");
+  workspace.listeners.add(listener);
+  // Proxies close silent connections, so send a comment line every 15 seconds.
+  const heartbeat = setInterval(() => res.write(": ping\n\n"), 15_000);
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    workspace.listeners.delete(listener);
+  });
 });
 
 app.get("/api/customers/:email", (req, res) => {
-  res.json(service.customerDetail(String(req.params.email)));
+  res.json(serviceOf(res).customerDetail(String(req.params.email)));
 });
 
 app.post("/api/invoices/:id/ask-for-date", limitWrites, (req, res) => {
-  res.status(201).json(service.askForDate(String(req.params.id)));
+  res.status(201).json(serviceOf(res).askForDate(String(req.params.id)));
 });
 
 app.get("/api/state", (_req, res) => {
-  service.settlePromises();
-  res.json(service.state());
+  const workspace = res.locals.workspace as Workspace;
+  workspace.service.settlePromises();
+  res.json({
+    ...workspace.service.state(),
+    workspace: { isolated: workspaces.isolated, kind: workspace.kind, canUseSandbox: workspaces.canUseSandbox },
+  });
 });
 
 app.get("/api/invoices/:id", (req, res) => {
-  res.json(service.detail(String(req.params.id)));
+  res.json(serviceOf(res).detail(String(req.params.id)));
 });
 
 app.post("/api/invoices", limitWrites, async (req, res) => {
@@ -125,23 +155,23 @@ app.post("/api/invoices", limitWrites, async (req, res) => {
       dueDate: date,
     })
     .parse(req.body);
-  res.status(201).json(await service.createInvoice({ ...input, amount: toCents(input.amount) }));
+  res.status(201).json(await serviceOf(res).createInvoice({ ...input, amount: toCents(input.amount) }));
 });
 
 app.post("/api/invoices/:id/replies", limitWrites, async (req, res) => {
   const { body } = z.object({ body: z.string().trim().min(1).max(4000) }).parse(req.body);
-  res.status(201).json(await service.addReply(String(req.params.id), body));
+  res.status(201).json(await serviceOf(res).addReply(String(req.params.id), body));
 });
 
 app.post("/api/actions/:id/:decision", async (req, res) => {
   const decision = z.enum(["approve", "reject"]).parse(req.params.decision);
   const { note } = z.object({ note: z.string().trim().min(1).max(1000).optional() }).parse(req.body ?? {});
-  res.json(await service.decide(String(req.params.id), decision === "approve", note));
+  res.json(await serviceOf(res).decide(String(req.params.id), decision === "approve", note));
 });
 
 app.post("/api/sync", async (_req, res) => {
-  await service.syncAll();
-  res.json(service.state());
+  await serviceOf(res).syncAll();
+  res.json(serviceOf(res).state());
 });
 
 app.put("/api/settings", (req, res) => {
@@ -154,29 +184,52 @@ app.put("/api/settings", (req, res) => {
       cashOnHand: z.number().min(0).max(100_000_000).optional(),
     })
     .parse(req.body);
-  service.updateSettings({
+  serviceOf(res).updateSettings({
     ...changes,
     ...(changes.obligation != null ? { obligation: toCents(changes.obligation) } : {}),
     ...(changes.cashOnHand != null ? { cashOnHand: toCents(changes.cashOnHand) } : {}),
   });
-  res.json(service.state());
+  res.json(serviceOf(res).state());
 });
 
 app.post("/api/demo/pay", (req, res) => {
   const { invoiceId, amount } = z.object({ invoiceId: z.string(), amount: dollars }).parse(req.body);
-  service.simulatePayment(invoiceId, toCents(amount));
-  res.json(service.state());
+  serviceOf(res).simulatePayment(invoiceId, toCents(amount));
+  res.json(serviceOf(res).state());
 });
 
-app.post("/api/demo/advance", (req, res) => {
+app.post("/api/demo/advance", limitWrites, (req, res) => {
   const { days } = z.object({ days: z.number().int().min(1).max(30) }).parse(req.body);
-  service.advanceClock(days);
-  res.json(service.state());
+  serviceOf(res).advanceClock(days);
+  res.json(serviceOf(res).state());
 });
 
-app.post("/api/demo/reset", async (_req, res) => {
+// Real sandbox invoices are slow and count against PayPal's limits, so these are rationed.
+function limitSandbox(req: Request) {
+  const perVisitor = allow(`sandbox:${req.ip ?? "unknown"}`, 5, 3_600_000);
+  if (!perVisitor || !allow("sandbox:all", 30, 3_600_000)) {
+    throw new HttpError(429, "Too many PayPal sandbox demos were started. Try again later.");
+  }
+}
+
+app.post("/api/demo/reset", limitWrites, async (req, res) => {
+  const service = serviceOf(res);
+  if ((res.locals.workspace as Workspace).kind === "sandbox") limitSandbox(req);
   await service.resetDemo();
   res.json(service.state());
+});
+
+// Starts a fresh private demo. The visitor keeps their current one if PayPal fails.
+app.post("/api/demo/workspace", limitWrites, async (req, res) => {
+  const { kind } = z.object({ kind: z.enum(["simulated", "sandbox"]) }).parse(req.body);
+  if (!workspaces.isolated) throw new HttpError(400, "This server doesn't use private demos.");
+  if (kind === "sandbox") {
+    if (!workspaces.canUseSandbox) throw new HttpError(400, "Real PayPal sandbox isn't configured here.");
+    limitSandbox(req);
+  }
+  const workspace = await workspaces.create(kind);
+  setCookie(req, res, workspace.id);
+  res.status(201).json({ kind: workspace.kind });
 });
 
 const dist = join(process.cwd(), "dist");
@@ -199,5 +252,5 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? (process.env.NODE_ENV === "production" ? "0.0.0.0" : "127.0.0.1");
 app.listen(port, host, () => {
-  console.log(`PayPromise API on http://${host}:${port} (PayPal: ${service.paypal.mode}, AI: ${service.analyzer.name})`);
+  console.log(`PayPromise API on http://${host}:${port} (PayPal: ${paypal.mode}, private demos: ${workspaces.isolated})`);
 });

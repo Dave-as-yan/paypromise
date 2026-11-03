@@ -77,6 +77,7 @@ server/plan.ts      Cash plan arithmetic, shared with the browser
 server/ai.ts        Claude analyzer and offline fallback rules
 server/paypal.ts    PayPal sandbox client and demo simulator
 server/service.ts   Workflow: replies, approvals, sync
+server/workspaces.ts  Private demos for each visitor
 server/index.ts     HTTP API
 src/App.tsx         Shell, live updates, undo, dialogs
 src/pages/          Today, Review, Cash plan, Customers, customer link
@@ -92,14 +93,20 @@ npm start
 
 Serves the API and dashboard on `PORT`. `render.yaml` defines a Render deployment. There is no login, so host demo data only.
 
-Two optional settings support a hosted demo:
+## Public demo
+
+With `DEMO_TOOLS=true`, every visitor gets a private, temporary demo, so one person's clicks never change what another sees. Each one starts with sample data and simulated PayPal, and has **Next day** and **Reset demo** buttons. These demos live in memory and end when the server restarts.
+
+If PayPal keys are set, **Use real PayPal sandbox** creates that visitor's own real sandbox invoices, so they can pay one and watch the webhook update their page. This is rate limited.
+
+Without `DEMO_TOOLS`, the server keeps one shared, saved workspace.
 
 | Setting | Effect |
 |---|---|
-| `SEED_DEMO=true` | Creates sample sandbox invoices when the database is empty |
-| `DEMO_TOOLS=true` | Shows a **Next day** button, so a broken promise can be demonstrated. It changes only the app's date, not PayPal |
+| `DEMO_TOOLS=true` | Private demos for each visitor, as above |
+| `SEED_DEMO=true` | Creates sample sandbox invoices when a shared workspace is empty |
 | `PUBLIC_URL` | Base address for customer links. Render sets its own, so this is only needed elsewhere |
-| `DATABASE_PATH` | Where the SQLite file lives. Point it at a persistent disk to keep data across restarts |
+| `DATABASE_PATH` | Where a shared workspace's SQLite file lives |
 
 ## Testing a payment
 

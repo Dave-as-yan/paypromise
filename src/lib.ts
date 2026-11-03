@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Service } from "../server/service.ts";
 
-export type AppState = ReturnType<Service["state"]>;
+export type AppState = ReturnType<Service["state"]> & {
+  workspace: { isolated: boolean; kind: "simulated" | "sandbox"; canUseSandbox: boolean };
+};
 export type Decision = AppState["decisions"][number];
 export type InvoiceRow = AppState["invoices"][number];
 export type CustomerDetail = ReturnType<Service["customerDetail"]>;
