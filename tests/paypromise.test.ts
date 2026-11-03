@@ -167,6 +167,13 @@ describe("cash forecast", () => {
     expect(state).toMatchObject({ promised: 0, atRisk: 100000 });
   });
 
+  it("moves a received payment into cash and lowers the shortfall", async () => {
+    const { service, created } = await withInvoice();
+    service.updateSettings({ targetDate: "2026-11-10", obligation: 150000, cashOnHand: 20000 });
+    service.simulatePayment(created.id, 100000);
+    expect(service.state().forecast).toMatchObject({ cashOnHand: 120000, atRisk: 0, shortfall: 30000 });
+  });
+
   it("does not count a promise dated after the target", async () => {
     const { service, created } = await withInvoice();
     service.updateSettings({ targetDate: "2026-11-05", obligation: 50000, cashOnHand: 0 });
@@ -202,5 +209,6 @@ describe("PayPal payment events", () => {
     const payments = service.store.events(created.id).filter((e) => e.text.startsWith("PayPal confirmed"));
     expect(payments).toHaveLength(1);
     expect(payments[0].text).toContain("$400.00");
+    expect(service.settings().cashOnHand).toBe(40000);
   });
 });

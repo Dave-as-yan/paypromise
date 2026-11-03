@@ -227,6 +227,7 @@ export class Service {
       });
       if (remote.paid > invoice.paid) {
         this.store.addEvent(invoice.id, `PayPal confirmed a payment of ${usd(remote.paid - invoice.paid)}. Paid so far: ${usd(remote.paid)}.`);
+        this.addCash(remote.paid - invoice.paid);
       }
     }
   }
@@ -274,6 +275,12 @@ export class Service {
     }
   }
 
+  // Money that arrives moves from "owed" to cash, so the forecast must count it.
+  private addCash(amount: number) {
+    const settings = this.settings();
+    this.store.saveSettings({ ...settings, cashOnHand: settings.cashOnHand + amount });
+  }
+
   updateSettings(changes: Partial<Pick<Settings, "targetDate" | "obligation" | "obligationLabel" | "cashOnHand">>) {
     this.store.saveSettings({ ...this.settings(), ...changes });
   }
@@ -288,6 +295,7 @@ export class Service {
     const paid = Math.min(invoice.amount, invoice.paid + amount);
     this.store.updateInvoice(invoice.id, { ...invoice, paid, status: paid >= invoice.amount ? "PAID" : "PARTIALLY_PAID" });
     this.store.addEvent(invoice.id, `Simulated PayPal payment of ${usd(paid - invoice.paid)} received.`);
+    this.addCash(paid - invoice.paid);
     this.settlePromises();
   }
 
