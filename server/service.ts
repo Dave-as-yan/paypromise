@@ -366,8 +366,19 @@ export class Service {
   }
 
   private async execute(action: Action) {
+    // A webhook can be late or missed, so ask PayPal before acting on an old proposal.
+    if (action.type !== "REVIEW" && action.type !== "VERIFY_PAYMENT") {
+      await this.syncInvoice(this.requireInvoice(action.invoiceId));
+    }
     const invoice = this.requireInvoice(action.invoiceId);
     const { payload } = action;
+
+    if (action.type !== "REVIEW" && action.type !== "VERIFY_PAYMENT" && balanceOf(invoice) === 0) {
+      throw new Error(`PayPal shows invoice ${invoice.number} has nothing left to pay, so nothing was changed.`);
+    }
+    if (payload.dueDate && payload.dueDate < this.today()) {
+      throw new Error(`The promised date, ${niceDate(payload.dueDate)}, has already passed. Ask the customer for a new one.`);
+    }
 
     // The invoice may have changed since this was proposed, so check again before acting.
     if (action.type === "ALLOW_PARTIAL" && payload.minimumDue! > balanceOf(invoice)) {
@@ -456,6 +467,7 @@ export class Service {
   settlePromises() {
     const today = this.today();
     for (const invoice of this.store.invoices()) {
+      this.closeStaleActions(invoice, today);
       for (const promise of this.store.promises(invoice.id)) {
         const status = settlePromise(promise, invoice, today);
         if (status === promise.status) continue;
@@ -476,6 +488,17 @@ export class Service {
             warnings: [],
           });
         }
+      }
+    }
+  }
+
+  // A proposal stops making sense once the invoice is settled or its date has gone by.
+  private closeStaleActions(invoice: Invoice, today: string) {
+    for (const action of this.store.actions(invoice.id).filter((a) => a.status === "PENDING")) {
+      const settled = balanceOf(invoice) === 0;
+      const expired = !!action.payload.dueDate && action.payload.dueDate < today;
+      if ((settled || expired) && this.store.claimAction(action.id, "REJECTED")) {
+        this.event(invoice.id, `Closed without action, because ${settled ? "the invoice has nothing left to pay" : "the date has passed"}: ${action.title}.`);
       }
     }
   }

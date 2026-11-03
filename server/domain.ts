@@ -198,7 +198,7 @@ export function proposeAction(analysis: Analysis, invoice: Invoice, today: strin
 // A promise is kept when enough new money arrives, and broken once its date has passed.
 export function settlePromise(promise: PaymentPromise, invoice: Invoice, today: string): PaymentPromise["status"] {
   if (promise.status !== "OPEN") return promise.status;
-  if (invoice.paid - promise.paidAtCreation >= promise.amount) return "KEPT";
+  if (invoice.status === "PAID" || invoice.paid - promise.paidAtCreation >= promise.amount) return "KEPT";
   return promise.dueDate < today ? "BROKEN" : "OPEN";
 }
 

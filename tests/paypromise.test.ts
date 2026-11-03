@@ -362,3 +362,56 @@ describe("sample data", () => {
     expect(state.decisions[0].impact.shortfallAfter).toBe(230000);
   });
 });
+
+describe("proposals on settled invoices", () => {
+  class PaidElsewhere extends SimulatedPaypal {
+    remote: PaypalInvoiceState | null = null;
+    reminders = 0;
+    override async get() {
+      return this.remote;
+    }
+    override async remind() {
+      this.reminders++;
+    }
+  }
+
+  it("closes open proposals when the invoice is paid", async () => {
+    const { service, created } = await withInvoice();
+    const { action } = await service.addReply(created.id, "I will pay on Friday");
+    service.simulatePayment(created.id, 100000);
+    expect(service.store.action(action.id)!.status).toBe("REJECTED");
+    expect(service.state().decisions).toHaveLength(0);
+    expect(service.store.promises(created.id)).toHaveLength(0);
+  });
+
+  it("closes a proposal once its date has passed", async () => {
+    const { service, created } = await withInvoice();
+    const { action } = await service.addReply(created.id, "I will pay on Friday");
+    service.advanceClock(4);
+    expect(service.store.action(action.id)!.status).toBe("REJECTED");
+    expect(service.store.promises(created.id)).toHaveLength(0);
+  });
+
+  it("checks PayPal first and sends nothing if a missed webhook hid the payment", async () => {
+    const paypal = new PaidElsewhere();
+    const service = new Service(new Store(), paypal, new RulesAnalyzer(), () => TODAY);
+    const created = await service.createInvoice({ customerName: "Test Co", customerEmail: "a@test.example", description: "Work", amount: 100000, dueDate: "2026-10-20" });
+    const action = service.askForDate(created.id);
+    paypal.remote = { paypalId: created.paypalId, amount: 100000, paid: 100000, status: "PAID", payUrl: null };
+    const result = await service.decide(action.id, true);
+    expect(paypal.reminders).toBe(0);
+    expect(result.status).toBe("FAILED");
+    expect(result.error).toContain("nothing left to pay");
+    expect(service.settings().cashOnHand).toBe(100000);
+  });
+
+  it("keeps an open promise when the invoice is fully paid, even after a correction", async () => {
+    const { service, created } = await withInvoice();
+    const { action } = await service.addReply(created.id, "I will pay on Friday");
+    await service.decide(action.id, true);
+    service.simulatePayment(created.id, 100000);
+    expect(service.store.promises(created.id)[0].status).toBe("KEPT");
+    service.advanceClock(10);
+    expect(service.store.actions(created.id).filter((a) => a.status === "PENDING")).toHaveLength(0);
+  });
+});

@@ -69,7 +69,7 @@ function Hero({ state, onEditPayroll }: Workspace & { onEditPayroll: () => void 
       <div className="hero-head">
         <div style={{ flex: "1 1 320px" }}>
           <div className="eyebrow">
-            {settings.obligationLabel} of {usd(f.obligation)} is due {longDate(f.targetDate)}, {days <= 0 ? "today" : `in ${days} day${days === 1 ? "" : "s"}`}
+            {settings.obligationLabel} of {usd(f.obligation)} {days < 0 ? `was due ${longDate(f.targetDate)}` : `is due ${longDate(f.targetDate)}, ${days === 0 ? "today" : `in ${days} day${days === 1 ? "" : "s"}`}`}
             {" · "}<button className="muted small" style={{ background: "none", border: 0, padding: 0, textDecoration: "underline" }} onClick={onEditPayroll}>Edit</button>
           </div>
           <div className={`big ${short ? "red" : "green"}`} style={{ marginTop: 6 }}>
