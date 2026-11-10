@@ -48,7 +48,7 @@ export interface PaymentPromise {
   amount: number;
   dueDate: string;
   paidAtCreation: number;
-  status: "OPEN" | "KEPT" | "BROKEN";
+  status: "OPEN" | "KEPT" | "BROKEN" | "RESCHEDULED";
   createdAt: string;
 }
 
@@ -194,6 +194,10 @@ export function proposeAction(analysis: Analysis, invoice: Invoice, today: strin
       return review(`No safe automatic step for this reply (${analysis.intent.toLowerCase()}).`);
   }
 }
+
+// A new date given before the old one passed is a reschedule, not a broken promise.
+export const replacedStatus = (promise: Pick<PaymentPromise, "dueDate">, today: string): PaymentPromise["status"] =>
+  promise.dueDate >= today ? "RESCHEDULED" : "BROKEN";
 
 // A promise is kept when enough new money arrives, and broken once its date has passed.
 export function settlePromise(promise: PaymentPromise, invoice: Invoice, today: string): PaymentPromise["status"] {
@@ -354,7 +358,7 @@ export function actionImpact(
       };
       return {
         ...input,
-        promises: [...input.promises.map((p) => (p.status === "OPEN" ? { ...p, status: "BROKEN" as const } : p)), hypothetical],
+        promises: [...input.promises.map((p) => (p.status === "OPEN" ? { ...p, status: replacedStatus(p, today) } : p)), hypothetical],
       };
     }
     return input;

@@ -492,3 +492,59 @@ describe("private demo workspaces", () => {
     expect(a.workspace.service.store.invoices()).toHaveLength(5);
   });
 });
+
+describe("rescheduled promises", () => {
+  async function partlyPaidPromise() {
+    const { service, created } = await withInvoice();
+    service.updateSettings({ targetDate: "2026-11-20", obligation: 150000, cashOnHand: 0 });
+    const { action } = await service.addReply(created.id, "I will pay on Friday");
+    await service.decide(action.id, true);
+    service.simulatePayment(created.id, 40000);
+    return { service, created };
+  }
+
+  it("keeps a promise moved before its date in the forecast and off the broken record", async () => {
+    const { service, created } = await partlyPaidPromise();
+    const moved = await service.addReply(created.id, "Sorry, I'll pay the rest on Nov 13");
+    expect(service.state().decisions[0].impact).toMatchObject({ shortfallBefore: 50000, shortfallAfter: 50000 });
+    await service.decide(moved.action.id, true);
+    const [old, current] = service.store.promises(created.id);
+    expect(old.status).toBe("RESCHEDULED");
+    expect(current).toMatchObject({ amount: 60000, dueDate: "2026-11-13", status: "OPEN" });
+    const state = service.state();
+    expect(state.invoices[0]).toMatchObject({ risk: "PROMISED", record: { kept: 0, broken: 0 } });
+    expect(state.forecast).toMatchObject({ cashOnHand: 40000, promised: 60000, shortfall: 50000 });
+  });
+
+  it("still counts a promise as broken once its date has passed", async () => {
+    const { service, created } = await partlyPaidPromise();
+    service.advanceClock(4);
+    const moved = await service.addReply(created.id, "Sorry, I'll pay the rest on Nov 13");
+    await service.decide(moved.action.id, true);
+    expect(service.store.promises(created.id)[0].status).toBe("BROKEN");
+    expect(service.state().invoices[0].record).toEqual({ kept: 0, broken: 1 });
+  });
+
+  it("closes a queued follow-up when the customer replies", async () => {
+    const { service, created } = await partlyPaidPromise();
+    service.advanceClock(4);
+    const followUp = service.store.actions(created.id).find((a) => a.status === "PENDING" && a.type === "SEND_REMINDER")!;
+    const reply = await service.addReply(created.id, "Sorry, I'll pay the rest on Nov 13");
+    expect(service.store.action(followUp.id)!.status).toBe("REJECTED");
+    expect(service.state().decisions.map((d) => d.action.id)).toEqual([reply.action.id]);
+  });
+
+  it("closes an unanswered request for a date when the customer answers on the link", async () => {
+    const { service, created } = await withInvoice();
+    const ask = service.askForDate(created.id);
+    service.respondFromLink(service.store.promiseLink(created.id), { choice: "DATE", date: "2026-11-09" });
+    expect(service.store.action(ask.id)!.status).toBe("REJECTED");
+  });
+
+  it("keeps a reminder the AI drafted in answer to the reply itself", async () => {
+    const { service, created } = await withInvoice();
+    const { action } = await service.addReply(created.id, "Can you resend the invoice?");
+    expect(action.type).toBe("SEND_REMINDER");
+    expect(service.store.action(action.id)!.status).toBe("PENDING");
+  });
+});
