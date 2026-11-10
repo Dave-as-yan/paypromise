@@ -10,6 +10,7 @@ import {
   planItems,
   promiseRecord,
   proposeAction,
+  replacedStatus,
   type RiskInput,
   riskTag,
   settlePromise,
@@ -273,6 +274,7 @@ export class Service {
       if (this.store.replies(invoice.id).find((r) => r.id === action.replyId)?.source !== "customer") continue;
       if (this.store.claimAction(action.id, "REJECTED")) this.event(invoice.id, "An earlier answer from the customer's link was replaced.");
     }
+    this.closeUnansweredReminders(invoice);
 
     const reply = this.store.addReply({ invoiceId: invoice.id, body: response.note ? `${body} Note: ${response.note}` : body, analysis, source: "customer", notice: null });
     const action = this.store.addAction({ invoiceId: invoice.id, replyId: reply.id, ...proposeAction(analysis, invoice, today) });
@@ -336,6 +338,7 @@ export class Service {
     const invoice = this.requireInvoice(invoiceId);
     const today = this.today();
     const { analysis, source, notice } = await this.analyzer.analyze(body, invoice, today);
+    this.closeUnansweredReminders(invoice);
     const reply = this.store.addReply({ invoiceId, body, analysis, source, notice });
     const proposal = proposeAction(analysis, invoice, today);
     const action = this.store.addAction({ invoiceId, replyId: reply.id, ...proposal });
@@ -420,8 +423,14 @@ export class Service {
   private trackPromise(invoice: Invoice, action: Action) {
     const { amount, dueDate } = action.payload;
     for (const open of this.store.promises(invoice.id).filter((p) => p.status === "OPEN")) {
-      this.store.setPromiseStatus(open.id, "BROKEN");
-      this.event(invoice.id, `Earlier promise for ${niceDate(open.dueDate)} replaced by a new one.`);
+      const status = replacedStatus(open, this.today());
+      this.store.setPromiseStatus(open.id, status);
+      this.event(
+        invoice.id,
+        status === "RESCHEDULED"
+          ? `Promise for ${niceDate(open.dueDate)} moved to ${niceDate(dueDate!)} before it was due.`
+          : `Earlier promise for ${niceDate(open.dueDate)} replaced by a new one.`,
+      );
     }
     this.store.addPromise({
       invoiceId: invoice.id,
@@ -500,6 +509,13 @@ export class Service {
       if ((settled || expired) && this.store.claimAction(action.id, "REJECTED")) {
         this.event(invoice.id, `Closed without action, because ${settled ? "the invoice has nothing left to pay" : "the date has passed"}: ${action.title}.`);
       }
+    }
+  }
+
+  // A reminder written before the customer answered would tell them they never replied.
+  private closeUnansweredReminders(invoice: Invoice) {
+    for (const action of this.store.actions(invoice.id).filter((a) => a.status === "PENDING" && a.type === "SEND_REMINDER" && a.replyId === null)) {
+      if (this.store.claimAction(action.id, "REJECTED")) this.event(invoice.id, `Closed without sending, because the customer replied: ${action.title}.`);
     }
   }
 
